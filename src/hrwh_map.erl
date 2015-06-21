@@ -52,10 +52,10 @@ stop(Server) ->
 insert_server(Server, ServerName, Weight) ->
   insert_server(Server, ServerName, Weight, 0).
 
--spec insert_server(server(), ServerName :: name(), weight(), OffLoad :: load()) ->
+-spec insert_server(server(), ServerName :: name(), weight(), Offload :: load()) ->
     ok.
-insert_server(Server, ServerName, Weight, OffLoad) ->
-  gen_server:call(Server, {?MODULE, insert_server, ServerName, Weight, OffLoad}).
+insert_server(Server, ServerName, Weight, Offload) ->
+  gen_server:call(Server, {?MODULE, insert_server, ServerName, Weight, Offload}).
 
 -spec get_server(server(), ServerName :: name()) ->
     {ok, {ServerName :: name(), weight(), Offload :: load()}} |
@@ -64,7 +64,7 @@ get_server(Server, ServerName) ->
   gen_server:call(Server, {?MODULE, get_server, ServerName}).
 
 -spec get_all_servers(server()) ->
-    [{ServerName :: name(), weight(), OffLoad :: load()}].
+    [{ServerName :: name(), weight(), Offload :: load()}].
 get_all_servers(Server) ->
   gen_server:call(Server, {?MODULE, get_all_servers}).
 
@@ -88,48 +88,55 @@ init(_Args) ->
   random:seed(os:timestamp()),
   {ok, #?STATE{table=Table}}.
 
-handle_call({?MODULE, insert_server, ServerName, Weight, OffLoad}, _From, State) ->
+handle_call({?MODULE, insert_server, ServerName, Weight, Offload}, _From, State) ->
   S = xxhash:hash32(ServerName),
-  ets:insert(State#?STATE.table, {ServerName, S, Weight, OffLoad}),
+  ets:insert(State#?STATE.table, {ServerName, S, Weight, Offload}),
   {reply, ok, State};
 handle_call({?MODULE, get_server, ServerName}, _From, State) ->
   case ets:lookup(State#?STATE.table, ServerName) of
-    [{ServerName, _, Weight, OffLoad}] ->
-      {reply, {ok, {ServerName, Weight, OffLoad}}, State};
+    [{ServerName, _, Weight, Offload}] ->
+      {reply, {ok, {ServerName, Weight, Offload}}, State};
     [] ->
       {reply, {error, not_found}, State}
   end;
 handle_call({?MODULE, get_all_servers}, _From, State) ->
-  {reply, ets:tab2list(State#?STATE.table), State};
+  Servers =
+    ets:foldl(
+      fun({ServerName, _S, Weight, Offload}, Acc) ->
+        [{ServerName, Weight, Offload} | Acc]
+      end,
+      [],
+      State#?STATE.table),
+  {reply, Servers, State};
 handle_call({?MODULE, delete_server, ServerName}, _From, State) ->
   ets:delete(State#?STATE.table, ServerName),
   {reply, ok, State};
 handle_call({?MODULE, select_server, ObjName}, _From, State) ->
   D = xxhash:hash32(ObjName),
   % Find a candidate and an alternative among all the servers.
-  {{ServerName, _, _, OffLoad}, {AltServerName, _, _}} =
+  {{ServerName, _, _, Offload}, {AltServerName, _, _}} =
     ets:foldl(
-      fun({ServerName1, S1, Weight1, OffLoad1},
-            {{ServerName0, S0, W0, OffLoad0}, {AltServerName, AltS, AltW}}) ->
+      fun({ServerName1, S1, Weight1, Offload1},
+            {{ServerName0, S0, W0, Offload0}, {AltServerName, AltS, AltW}}) ->
         W1 = weight(S1, D) * Weight1,
         case is_preferred(W1, S1, W0, S0) of
           true ->
             % New most preferred server found.
-            % Old most preferred server becomes alternative if not offloading.
+            % Old most preferred server becomes alternative if not Offloading.
             AltServer =
-              case OffLoad0 == 0 of
+              case Offload0 == 0 of
                 true -> {ServerName0, S0, W0};
                 _ -> {AltServerName, AltS, AltW}
               end,
-            {{ServerName1, S1, W1, OffLoad1}, AltServer};
+            {{ServerName1, S1, W1, Offload1}, AltServer};
           _ ->
             % Check to replace alternative.
             AltServer =
-              case (OffLoad1 == 0) andalso is_preferred(W1, S1, AltW, AltS) of
+              case (Offload1 == 0) andalso is_preferred(W1, S1, AltW, AltS) of
                 true -> {ServerName1, S1, W1};
                 _ -> {AltServerName, AltS, AltW}
               end,
-            {{ServerName0, S0, W0, OffLoad0}, AltServer}
+            {{ServerName0, S0, W0, Offload0}, AltServer}
         end
       end,
       {{undefined, 0, 0, 0}, {undefined, 0, 0}},
@@ -138,7 +145,7 @@ handle_call({?MODULE, select_server, ObjName}, _From, State) ->
   % Roll a dice to use the candidate or the alternative.
   Result =
     case random:uniform() of
-      R when R >= OffLoad -> ServerName;
+      R when R >= Offload -> ServerName;
       _ -> AltServerName
     end,
   {reply, Result, State};
